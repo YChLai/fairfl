@@ -6,116 +6,154 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 import copy
+import math
 
-# 引入之前的 setupCV
-import setupCV 
+import setupCV
+import utils  # 确保导入了我们精简后的 utils.py
 
 def run_fair_cv(clients, server, args):
     """
-    适配 CIFAR-10 的 FairGraphFL 训练主循环
-    逻辑：
-    1. 本地训练
-    2. 计算类原型 (Class Prototypes)
-    3. 服务器基于 Reputation 聚合全局原型
-    4. 计算相似度并更新 Reputation
-    5. 基于 Reputation 聚合模型权重 (Weighted Aggregation)
+    FairGraphFL-CV (With Incentive Mechanism)
     """
-    
-    # 初始化 Reputation，初始时均匀分布
+    # 初始化 Reputation
     rs = torch.ones(len(clients)) / len(clients)
     
-    # 记录结果
-    frame = pd.DataFrame()
+    # 记录上一轮的全局模型参数 (用于计算梯度更新量)
+    # W_global_old
+    server_params_old = copy.deepcopy(server.model.state_dict())
     
+    frame = pd.DataFrame()
     print(f"Start Training with {len(clients)} clients on {args.device}")
 
     for round_idx in range(1, args.num_rounds + 1):
         print(f"\n--- Round {round_idx} ---")
         
-        # 1. 客户端下载最新的全局模型
-        # 注意：每一轮开始前，根据上一轮计算出的 rs 进行加权聚合后的模型被分发
-        for client in clients:
-            client.download_from_server(server)
-        
+        # ---------------------------------------------------------
+        # 1. 客户端下载模型 (Incentive 分发后的模型)
+        # ---------------------------------------------------------
+        # 注意：这里不再是简单的 client.download_from_server(server)
+        # 因为每个 Client 获得的模型可能不一样（被掩码过）
+        # 我们在上一轮结尾已经把处理好的参数赋值给了 client.model，所以这里不需要额外操作
+        # 只有第一轮需要初始化
+        if round_idx == 1:
+            for client in clients:
+                client.download_from_server(server)
+
+        # ---------------------------------------------------------
         # 2. 本地训练 & 计算原型
-        # 为了提高效率，并非所有客户端每轮都必须被选中，这里演示全量参与(Full participation)
-        # 如果客户端较多，可以采样 selected_clients
-        selected_clients = clients 
-        
+        # ---------------------------------------------------------
+        selected_clients = clients
         for i, client in enumerate(selected_clients):
-            # 本地训练
             client.local_train(args.local_epoch)
-            
-            # 更新本地类原型 (计算特征均值)
             client.prototype_update()
             
-            # 简单打印一下进度
-            if i % 5 == 0:
-                print(f"  > Client {client.id} training done.")
-
-        # 3. 服务器聚合全局原型 (Reputation-based)
-        # 第一轮 rs 是均匀的，后续轮次 rs 会根据相似度变化
+        # ---------------------------------------------------------
+        # 3. 服务器聚合原型 & 更新 Reputation
+        # ---------------------------------------------------------
+        # 聚合原型
         if round_idx == 1:
-            # 第一轮也可以直接简单平均
             server.reput_aggregate_prototype(rs, selected_clients)
         else:
             server.reput_aggregate_prototype(rs, selected_clients)
             
-        # 4. 计算相似度并更新 Reputation
+        # 计算相似度并更新 Reputation
         phis = torch.zeros(len(selected_clients))
         for i, client in enumerate(selected_clients):
-            # 计算本地原型与全局原型的余弦相似度
             phis[i] = client.cosine_similar(server)
         
-        # 平滑更新 Reputation
-        # alpha=0.05 是原项目的默认动量参数
+        # 动量更新
         rs = 0.95 * rs + 0.05 * phis
-        
-        # 确保 rs 为正数且归一化
         rs = torch.clamp(rs, min=1e-3)
         rs = torch.div(rs, rs.sum())
         
         print(f"  > Current Reputations (First 5): {rs[:5].tolist()}")
-        
-        # 5. 更新全局模型权重 (核心：基于 Reputation 加权聚合)
-        # 严格遵循 FairGraphFL 思想：Reputation 高的模型权重占比更大
-        
+
+        # ---------------------------------------------------------
+        # 4. 计算全局模型更新 (Global Update)
+        # ---------------------------------------------------------
+        # 先计算这一轮理想的全局模型 (W_global_new)
         global_dict = {}
-        server_params = server.model.state_dict()
-        
         # 初始化
-        for k in server_params.keys():
-            global_dict[k] = torch.zeros_like(server_params[k])
+        for k in server_params_old.keys():
+            global_dict[k] = torch.zeros_like(server_params_old[k])
             
-        # 加权累加
+        # 加权聚合 (Aggregation)
         for i, client in enumerate(selected_clients):
             client_params = client.model.state_dict()
-            weight = rs[i].item() # 使用 Reputation 作为聚合权重
-            
+            weight = rs[i].item()
             for k in global_dict.keys():
                 global_dict[k] += client_params[k] * weight
-                
-        # 更新服务器模型
+        
+        # 计算全局更新量 (Gradient): Delta = W_new - W_old
+        # 这里我们将参数变化量视为"梯度"
+        global_update_dict = {}
+        for k in global_dict.keys():
+            global_update_dict[k] = global_dict[k] - server_params_old[k]
+            
+        # 将 Dict 转换为 list 格式，方便 utils 处理
+        # 顺序必须固定，使用 keys() 排序或固定顺序
+        param_keys = list(global_update_dict.keys())
+        global_update_list = [global_update_dict[k] for k in param_keys]
+
+        # 更新服务器的物理模型 (用于评估和下一轮基准)
         server.model.load_state_dict(global_dict)
-        # 同步 server.W，以便下一轮分发
-        server.W = {key: value for key, value in server.model.named_parameters()}
         
-        # 6. 清理缓存的原型 (下一轮重新计算)
-        # for client in selected_clients:
-        #    client.clear_prototype() # 如果 Client 类里有这个方法可以调用，没有也不影响覆盖
+        # ---------------------------------------------------------
+        # 5. 激励机制 (Incentive): 梯度掩码分发
+        # ---------------------------------------------------------
+        # 这里的逻辑是：Client_Next = Server_Old + Mask(Delta)
+        # 声誉越高的客户端，得到的 Delta 越完整；声誉低的，得到的 Delta 越稀疏。
         
-        # 7. 测试评估 (使用测试集评估每个客户端的准确率)
-        # 也可以只评估 Global Model 在 Test Set 上的表现，这里按原项目习惯评估每个客户端
+        # 计算掩码比例 q_ratios
+        # 使用 tanh 函数将声誉映射到 (0, 1] 区间，声誉越高 q 越大
+        # 系数 5.0 是一个超参数，控制激励的敏感度，可以调整
+        # rs 是归一化的，数值较小 (e.g. 0.1)，所以需要乘一个系数让它在 tanh 上有区分度
+        q_ratios = torch.tanh(5.0 * rs) 
+        q_ratios = q_ratios / torch.max(q_ratios) # 归一化，让最好的客户端获得 1.0 (100%更新)
+        
+        print(f"  > Incentive Ratios (First 5): {q_ratios[:5].tolist()}")
+
+        for i, client in enumerate(selected_clients):
+            # 获取该客户端的保留比例
+            mask_ratio = q_ratios[i].item()
+            
+            # 对全局更新量进行掩码 (只保留幅值最大的前 mask_ratio 部分)
+            # 注意：mask_grad_update_by_order 会修改传入的 list，所以要深拷贝
+            masked_update_list = utils.mask_grad_update_by_order(
+                copy.deepcopy(global_update_list), 
+                mask_percentile=mask_ratio, 
+                mode='all' # 全局掩码模式，也可以选 'layer' 层级掩码
+            )
+            
+            # 构造客户端的新参数: W_client_new = W_server_old + Masked_Delta
+            client_new_dict = {}
+            for idx, k in enumerate(param_keys):
+                # 恢复参数形状并相加
+                update_tensor = masked_update_list[idx]
+                client_new_dict[k] = server_params_old[k] + update_tensor
+            
+            # 将新参数加载给客户端，供下一轮训练使用
+            client.model.load_state_dict(client_new_dict)
+            # 同步 W (用于优化器等)
+            client.W = {key: value for key, value in client.model.named_parameters()}
+
+        # ---------------------------------------------------------
+        # 6. 更新基准模型 (Old Server Model)
+        # ---------------------------------------------------------
+        server_params_old = copy.deepcopy(server.model.state_dict())
+
+        # ---------------------------------------------------------
+        # 7. 测试评估
+        # ---------------------------------------------------------
         if round_idx % 1 == 0:
             test_accs = []
+            # 评估服务器模型（最完美的模型）
+            # 或者评估各个客户端手中的模型（被掩码过的模型）
+            # 原论文通常评估服务器模型，但为了看激励效果，我们可以看客户端模型的精度
+            
+            # 这里演示评估每个客户端自己的模型性能
             for client in clients:
-                # 评估前先确保客户端模型是最新的(聚合后的)，或者评估聚合前的？
-                # 通常评估的是聚合后的全局模型在各个客户端数据分布上的表现
-                # 这里我们让客户端加载刚刚聚合好的全局模型进行评估
-                client.download_from_server(server)
-                _, acc = client.model.eval(), 0
-                
-                # 简单的 evaluate 实现
+                client.model.eval()
                 correct = 0
                 total = 0
                 with torch.no_grad():
@@ -130,7 +168,9 @@ def run_fair_cv(clients, server, args):
                 frame.loc[client.name, f'round_{round_idx}'] = acc
             
             avg_acc = np.mean(test_accs)
-            print(f"  > Round {round_idx} Average Test Acc: {avg_acc:.2f}%")
+            print(f"  > Round {round_idx} Avg Client Acc: {avg_acc:.2f}%")
+            # 也可以单独打印 Client 0 (坏人) 和 Client 2 (好人) 的精度对比
+            print(f"  > Acc Gap: Good(C2) {test_accs[2]:.2f}% vs Bad(C0) {test_accs[0]:.2f}%")
 
     return frame
 
