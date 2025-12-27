@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 import random
-
+import fl_utils as utils
 class Server():
     def __init__(self, model, device):
         self.model = model.to(device)

@@ -4,7 +4,7 @@ import numpy as np
 import random
 import os
 import copy
-from client import Client_CV
+from fl_client import Client_CV
 from server import Server
 from models import CNNCifar
 

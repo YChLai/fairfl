@@ -10,9 +10,9 @@ import math
 from sklearn.mixture import GaussianMixture # 需要安装 scikit-learn
 from blockchain_adapter import BlockchainLogger
 import setupCV
-import utils
+import fl_utils as utils
 
-def run_fair_fedcorr(clients, server, args):
+def run_fair_fedcorr(clients, server, args, bc_logger):
     """
     FairGraphFL + FedCorr 融合训练流程
     """
@@ -191,7 +191,7 @@ def run_fair_fedcorr(clients, server, args):
     return frame
 
 if __name__ == '__main__':
-    CONTRACT_ADDR = "0x1234567890abcdef1234567890abcdef12345678" 
+    CONTRACT_ADDR = "0x2af6160e266f763652f433a80b94fc13f4065303" 
     bc_logger = BlockchainLogger(CONTRACT_ADDR)
     parser = argparse.ArgumentParser()
     
@@ -244,7 +244,7 @@ if __name__ == '__main__':
     
     # 注意这里调用的是 run_fair_fedcorr
     print("Starting FairGraphFL + FedCorr training...")
-    result_frame = run_fair_fedcorr(clients, server, args)
+    result_frame = run_fair_fedcorr(clients, server, args, bc_logger)
     
     outfile = os.path.join(outpath, 'accuracy.csv')
     result_frame.to_csv(outfile)
