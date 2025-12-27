@@ -168,9 +168,6 @@ def run_fair_cv(clients, server, args):
                 frame.loc[client.name, f'round_{round_idx}'] = acc
             
             avg_acc = np.mean(test_accs)
-            print(f"  > Round {round_idx} Avg Client Acc: {avg_acc:.2f}%")
-            # 也可以单独打印 Client 0 (坏人) 和 Client 2 (好人) 的精度对比
-            print(f"  > Acc Gap: Good(C2) {test_accs[2]:.2f}% vs Bad(C0) {test_accs[0]:.2f}%")
 
     return frame
 
@@ -197,6 +194,11 @@ if __name__ == '__main__':
                         help='Dirichlet distribution alpha for Non-IID setting (smaller = more non-iid)')
     # 注意：noise_rate 的逻辑目前硬编码在 setupCV 中（前20%客户端高噪声），
     # 如果需要动态调整，可以修改 setupCV 使其接受参数。
+    
+    parser.add_argument('--level_n_system', type=float, default=0.3, 
+                        help='Fraction of noisy clients (e.g. 0.3 means 30% clients have noise)')
+    parser.add_argument('--level_n_lowerb', type=float, default=0.5, 
+                        help='Lower bound of noise level (e.g. 0.5 means noise ratio is between 0.5 and 1.0)')
 
     args = parser.parse_args()
 
