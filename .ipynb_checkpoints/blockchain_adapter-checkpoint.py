@@ -1,18 +1,24 @@
+import sys
+import os
+
+# 【新增】手动添加 sdk 路径，确保能 import bcos3sdk
+# 无论你在哪里运行代码，都能找到 /root/python-sdk
+sys.path.append("/root/python-sdk")
+
 import json
 import time
 import hashlib
-from client.bcosclient import BcosClient
-from client.datatype_parser import DatatypeParser
-
+from bcos3sdk.bcos3client import Bcos3Client
+from client.common.transaction_exception import TransactionException
 class BlockchainLogger:
     def __init__(self, contract_address):
         """
         初始化区块链连接
         contract_address: 你在 WeBASE 部署后得到的 0x... 地址
         """
-        self.client = BcosClient()
+        self.client = Bcos3Client()
         self.contract_address = contract_address
-        self.abi_file = "contracts/FLAudit.abi" # 确保你把 ABI 文件放到了这里
+        self.abi_file = "contracts/FLAudit.abi"
         
         try:
             with open(self.abi_file, 'r') as f:
@@ -63,21 +69,25 @@ class BlockchainLogger:
 
         # 5. 发送交易调用合约
         try:
-            # 调用 recordRound 函数
-            # 参数顺序必须与 Solidity 一致: roundId, timestamp, globalModelHash, contribJson, incentiveJson
-            receipt = self.client.sendRawTransactionGetReceipt(
+            # 【修改点3】 v3 发送交易的方法变了
+            # sendTransaction(合约地址, ABI, 方法名, 参数列表)
+            receipt = self.client.sendTransaction(
                 self.contract_address,
                 self.contract_abi,
                 "recordRound",
                 [round_idx, timestamp, global_hash, contrib_json, incentive_json]
             )
             
-            # 检查结果
-            if receipt['status'] == '0x0':
+            # 【修改点4】 检查回执状态
+            # v3 返回的 receipt 通常是一个字典，status 为 0 表示成功
+            if receipt['status'] == 0:
                 print(f"[Blockchain] ✅ Round {round_idx} saved successfully!")
                 print(f"[Blockchain] Tx Hash: {receipt['transactionHash']}")
             else:
                 print(f"[Blockchain] ❌ Transaction failed. Status: {receipt['status']}")
+                # v3 有时会在 output 中包含错误信息
+                if 'output' in receipt:
+                    print(f"Output: {receipt['output']}")
                 
         except Exception as e:
             print(f"[Blockchain] ❌ Error uploading to chain: {e}")

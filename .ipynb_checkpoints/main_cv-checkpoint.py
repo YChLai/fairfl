@@ -8,7 +8,6 @@ from pathlib import Path
 import copy
 import math
 from sklearn.mixture import GaussianMixture # 需要安装 scikit-learn
-from blockchain_adapter import BlockchainLogger
 import setupCV
 import fl_utils as utils
 
@@ -186,13 +185,10 @@ def run_fair_fedcorr(clients, server, args, bc_logger):
                 print(f"    Client {i}: {acc:.2f}%")
             print(f"  > Avg Acc: {np.mean(test_accs):.2f}%")
 
-        bc_logger.log_round(round_idx, server, selected_clients, rs, q_ratios)
 
     return frame
 
 if __name__ == '__main__':
-    CONTRACT_ADDR = "0x2af6160e266f763652f433a80b94fc13f4065303" 
-    bc_logger = BlockchainLogger(CONTRACT_ADDR)
     parser = argparse.ArgumentParser()
     
     # 基础设置

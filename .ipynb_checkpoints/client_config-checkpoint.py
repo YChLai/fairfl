@@ -40,8 +40,9 @@ class client_config:
     # ------------------FISCO BCOS3.0 Begin----------------------------------------
     # FISCO BCOS3.0的配置段，如连接FISCO BCOS2.0版本，无需关心此段
     # FISCO BCOS3.0 c底层sdk的配置，都在bcos3_config_file里，无需配置在此文件
-    bcos3_lib_path = "./bcos3sdklib"
-    bcos3_config_file = "./bcos3sdklib/bcos3_sdk_config.ini"
+    bcos3_lib_path = "/root/python-sdk/bcos3sdklib"
+    bcos3_config_file = "/root/python-sdk/bcos3sdklib/bcos3_sdk_config.ini"
+    
     group = "group0"
     # -------------------FISCO BCOS3.0 End-----------------------------------------
     
