@@ -1,20 +1,16 @@
 import torch
 import copy
 import math
+import numpy as np
+import torch.nn.functional as F
+from scipy.spatial.distance import cdist # 需要 pip install scipy
 
-# --- 移除了所有图相关的函数 (get_maxDegree, convert_to_nodeDegreeFeatures 等) ---
+# --- 原 FairGraphFL 工具函数 (保持不变) ---
 
 def flatten(grad_update):
-    """
-    将参数列表展平为一维向量，用于计算范数或相似度
-    """
     return torch.cat([update.data.view(-1) for update in grad_update])
 
-
 def unflatten(flattened, normal_shape):
-    """
-    将展平的向量恢复为原始参数形状
-    """
     grad_update = []
     for param in normal_shape:
         n_params = len(param.view(-1))
@@ -22,22 +18,13 @@ def unflatten(flattened, normal_shape):
         flattened = flattened[n_params:]
     return grad_update
 
-
 def mask_grad_update_by_magnitude(grad_update, mask_constant):
-    """
-    基于幅度掩码梯度：绝对值小于 mask_constant 的置为 0
-    """
     grad_update = copy.deepcopy(grad_update)
     for i, update in enumerate(grad_update):
         grad_update[i].data[update.data.abs() < mask_constant] = 0
     return grad_update
 
-
 def mask_grad_update_by_order(grad_update, mask_order=None, mask_percentile=None, mode='all'):
-    """
-    基于排名掩码梯度：保留最大的前 k 个值，其余置为 0。
-    这是 FairGraphFL 进行贡献度分配（Reputation-based Gradient Masking）的核心工具。
-    """
     if mode == 'layer':
         grad_update = copy.deepcopy(grad_update)
         mask_percentile = max(0, mask_percentile)
@@ -62,12 +49,69 @@ def mask_grad_update_by_order(grad_update, mask_order=None, mask_percentile=None
             topk, indices = torch.topk(all_update_mod, mask_order)
             return mask_grad_update_by_magnitude(grad_update, topk[-1])
 
-
 def add_gradient_updates(grad_update_1, grad_update_2, weight=1.0):
-    """
-    累加梯度更新
-    """
     assert len(grad_update_1) == len(grad_update_2), "Lengths of the two grad_updates not equal"
-    
     for param_1, param_2 in zip(grad_update_1, grad_update_2):
         param_1.data += param_2.data * weight
+
+# --- 新增: FedCorr 核心函数 ---
+
+def lid_term(X, batch, k=20):
+    """
+    计算局部内在维度 (LID) - 修复版
+    """
+    eps = 1e-6
+    X = np.asarray(X, dtype=np.float32)
+    batch = np.asarray(batch, dtype=np.float32)
+    
+    f = lambda v: - k / (np.sum(np.log(v / (v[-1]+eps)))+eps)
+    distances = cdist(X, batch)
+
+    # 获取最近的 k 个邻居
+    sort_indices = np.apply_along_axis(np.argsort, axis=1, arr=distances)[:, 1:k + 1]
+    m, n = sort_indices.shape
+    
+    # === 修复点：强制转换为 list，防止 np.ogrid 返回 tuple 导致报错 ===
+    idx = list(np.ogrid[:m, :n])
+    
+    # 现在 idx 肯定是 list，可以修改了
+    idx[1] = sort_indices
+    
+    # sorted matrix
+    distances_ = distances[tuple(idx)]
+    lids = np.apply_along_axis(f, axis=1, arr=distances_)
+    return lids
+
+def get_output(loader, net, args, criterion=None):
+    """
+    获取模型在数据集上的输出概率和损失
+    """
+    net.eval()
+    output_whole = []
+    loss_whole = []
+    with torch.no_grad():
+        for i, (images, labels) in enumerate(loader):
+            images = images.to(args.device)
+            labels = labels.to(args.device)
+            
+            # 注意：这里的 model 输出格式需适配你的 models.py
+            # 假设 CNNCifar 返回 (log_softmax, feature1, feature2)
+            outputs, _, _ = net(images)
+            
+            # 如果输出已经是 log_softmax，这里可能不需要再 F.softmax
+            # 但为了计算 LID，通常需要概率分布
+            probs = torch.exp(outputs) 
+            
+            if criterion is not None:
+                # 计算每个样本的 loss (reduction='none')
+                loss = criterion(outputs, labels) 
+                loss_whole.append(loss.cpu().numpy())
+            
+            output_whole.append(probs.cpu().numpy())
+            
+    output_whole = np.concatenate(output_whole, axis=0)
+    if criterion is not None:
+        loss_whole = np.concatenate(loss_whole, axis=0)
+        return output_whole, loss_whole
+    else:
+        return output_whole
