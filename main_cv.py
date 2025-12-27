@@ -11,7 +11,7 @@ from sklearn.mixture import GaussianMixture # 需要安装 scikit-learn
 import setupCV
 import fl_utils as utils
 
-def run_fair_fedcorr(clients, server, args, bc_logger):
+def run_fair_fedcorr(clients, server, args):
     """
     FairGraphFL + FedCorr 融合训练流程
     """
@@ -240,7 +240,7 @@ if __name__ == '__main__':
     
     # 注意这里调用的是 run_fair_fedcorr
     print("Starting FairGraphFL + FedCorr training...")
-    result_frame = run_fair_fedcorr(clients, server, args, bc_logger)
+    result_frame = run_fair_fedcorr(clients, server, args)
     
     outfile = os.path.join(outpath, 'accuracy.csv')
     result_frame.to_csv(outfile)
