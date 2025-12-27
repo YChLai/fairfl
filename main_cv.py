@@ -7,7 +7,7 @@ import pandas as pd
 from pathlib import Path
 import copy
 import math
-from sklearn.mixture import GaussianMixture # 需要 pip install scikit-learn
+from sklearn.mixture import GaussianMixture # 需要安装 scikit-learn
 
 import setupCV
 import utils
@@ -28,64 +28,74 @@ def run_fair_fedcorr(clients, server, args):
     for round_idx in range(1, args.num_rounds + 1):
         print(f"\n--- Round {round_idx} ---")
 
-        # 1. 激励分发 (FairGraphFL 逻辑)
-        # 第一轮直接下载，后续轮次通过梯度掩码更新了，无需下载
+        # ---------------------------------------------------------
+        # 1. 激励分发 (FairGraphFL)
+        # ---------------------------------------------------------
         if round_idx == 1:
             for client in clients:
                 client.download_from_server(server)
         
-        # 2. 本地训练 & LID 收集
+        # ---------------------------------------------------------
+        # 2. 本地训练 & LID 收集 (FedCorr)
+        # ---------------------------------------------------------
         selected_clients = clients
         for i, client in enumerate(selected_clients):
             client.local_train(args.local_epoch)
             client.prototype_update() # FairGraphFL 需要原型
             
-            # --- FedCorr: 收集 LID ---
-            # 从指定轮次开始收集，让模型先稳定一下
+            # === FedCorr: 收集 LID ===
+            # 【这里控制 LID 开始收集的时间】
             if round_idx >= args.lid_start_round:
                 avg_lid, _ = client.compute_lid_score()
                 lid_accumulative[i] += avg_lid
 
-        # 3. FedCorr 噪声检测与修正逻辑 (在指定轮次触发)
+        # ---------------------------------------------------------
+        # 3. FedCorr 噪声检测与修正逻辑
+        # ---------------------------------------------------------
+        # 【这里控制执行清洗的时间】
         if round_idx == args.correction_round:
             print("\n*** Executing FedCorr Noise Correction ***")
             
             # (1) 使用 GMM 将客户端分为 Clean 和 Noisy
-            # 输入数据需要 reshape 为 (-1, 1)
             lid_array = lid_accumulative.reshape(-1, 1)
-            gmm = GaussianMixture(n_components=2, random_state=args.seed).fit(lid_array)
-            labels = gmm.predict(lid_array)
-            
-            # 假设 LID 较小的组是 Clean 的 (LID 越小，数据流形越简单，噪声越少)
-            clean_label = np.argsort(gmm.means_[:, 0])[0]
-            
-            noisy_clients_idx = np.where(labels != clean_label)[0]
-            clean_clients_idx = np.where(labels == clean_label)[0]
-            
-            print(f"  > Detected Noisy Clients: {noisy_clients_idx}")
-            print(f"  > Detected Clean Clients: {clean_clients_idx}")
-            
-            # (2) 对噪声客户端进行标签修正
-            for idx in noisy_clients_idx:
-                client = clients[idx]
-                _, loss_whole = client.compute_lid_score()
+            # 如果 LID 还没收集到数据（比如 lid_start_round 设得太晚），这里会报错，所以要确保有数据
+            if np.all(lid_array == 0):
+                print("Warning: No LID scores collected yet! Check lid_start_round.")
+            else:
+                gmm = GaussianMixture(n_components=2, random_state=args.seed).fit(lid_array)
+                labels = gmm.predict(lid_array)
                 
-                # 在 Loss 上再跑一次 GMM 估算该客户端的噪声比例
-                # Loss 较小的是 Clean 样本，Loss 较大的是 Noisy 样本
-                gmm_loss = GaussianMixture(n_components=2, random_state=args.seed).fit(loss_whole.reshape(-1, 1))
-                labels_loss = gmm_loss.predict(loss_whole.reshape(-1, 1))
-                clean_label_loss = np.argsort(gmm_loss.means_[:, 0])[0]
+                # LID 较小的组是 Clean 的
+                clean_label = np.argsort(gmm.means_[:, 0])[0]
                 
-                # 预测为噪声样本的数量
-                pred_noisy_count = np.sum(labels_loss != clean_label_loss)
-                estimated_noise_level = pred_noisy_count / len(loss_whole)
+                noisy_clients_idx = np.where(labels != clean_label)[0]
+                clean_clients_idx = np.where(labels == clean_label)[0]
                 
-                print(f"  > Client {idx} estimated noise level: {estimated_noise_level:.2f}")
+                print(f"  > Detected Noisy Clients: {noisy_clients_idx}")
+                print(f"  > Detected Clean Clients: {clean_clients_idx}")
                 
-                # 执行修正
-                client.correct_labels(server, estimated_noise_level)
+                # (2) 对噪声客户端进行标签修正
+                for idx in noisy_clients_idx:
+                    client = clients[idx]
+                    _, loss_whole = client.compute_lid_score()
+                    
+                    # 在 Loss 上再跑一次 GMM 估算该客户端的噪声比例
+                    gmm_loss = GaussianMixture(n_components=2, random_state=args.seed).fit(loss_whole.reshape(-1, 1))
+                    labels_loss = gmm_loss.predict(loss_whole.reshape(-1, 1))
+                    clean_label_loss = np.argsort(gmm_loss.means_[:, 0])[0]
+                    
+                    # 预测为噪声样本的数量
+                    pred_noisy_count = np.sum(labels_loss != clean_label_loss)
+                    estimated_noise_level = pred_noisy_count / len(loss_whole)
+                    
+                    print(f"  > Client {idx} estimated noise level: {estimated_noise_level:.2f}")
+                    
+                    # 执行修正
+                    client.correct_labels(server, estimated_noise_level)
 
-        # 4. FairGraphFL 聚合与激励 (保持不变)
+        # ---------------------------------------------------------
+        # 4. FairGraphFL 聚合与激励
+        # ---------------------------------------------------------
         server.reput_aggregate_prototype(rs, selected_clients)
         
         # 计算相似度更新声誉
@@ -97,17 +107,25 @@ def run_fair_fedcorr(clients, server, args):
         rs = torch.clamp(rs, min=1e-3)
         rs = torch.div(rs, rs.sum())
         
+        # 打印 Reputation
         print(f"  > Reputations: {[round(x, 4) for x in rs.tolist()]}")
         
         # 全局模型加权聚合
+        # 注意：这里加了强制 float 转换，防止 ResNet 的 Long 类型参数报错
         global_dict = {}
         for k in server_params_old.keys():
-            global_dict[k] = torch.zeros_like(server_params_old[k])
+            global_dict[k] = torch.zeros_like(server_params_old[k], dtype=torch.float)
+        
         for i, client in enumerate(selected_clients):
             client_params = client.model.state_dict()
             weight = rs[i].item()
             for k in global_dict.keys():
                 global_dict[k] += client_params[k] * weight
+        
+        # 转回 Long 类型 (如果原始参数是 Long)
+        for k in global_dict.keys():
+            if server_params_old[k].dtype == torch.long:
+                global_dict[k] = global_dict[k].long()
                 
         # 计算全局更新量
         global_update_dict = {}
@@ -119,12 +137,19 @@ def run_fair_fedcorr(clients, server, args):
         # 更新 Server 模型
         server.model.load_state_dict(global_dict)
         
-        # 计算激励比例
-        q_ratios = torch.tanh(100.0 * rs)
-        q_ratios = q_ratios / torch.max(q_ratios)
-        print(f"  > Incentive Ratios: {[round(x, 4) for x in q_ratios.tolist()]}")q_ratios = rs_norm ** 3
-            # 保证最低 0.05
-            q_ratios = 0.05 + 0.95 * q_ratios
+        # 计算激励比例 (Incentive Ratios)
+        # 加入 Warm-up：前2轮不开启激进惩罚，让模型先学好特征
+        rs_min = rs.min()
+        rs_max = rs.max()
+        rs_norm = (rs - rs_min) / (rs_max - rs_min + 1e-9)
+        
+        if round_idx <= 2:
+            q_ratios = torch.ones_like(rs)
+            print(f"  > [Warm-up Phase] Incentive mechanism disabled")
+        else:
+            # 激进惩罚策略
+            q_ratios = 0.3 + 0.7 * rs_norm 
+            print(f"  > Incentive Ratios: {[round(x, 4) for x in q_ratios.tolist()]}")
         
         # 分发掩码后的梯度
         for i, client in enumerate(selected_clients):
@@ -140,7 +165,9 @@ def run_fair_fedcorr(clients, server, args):
             
         server_params_old = copy.deepcopy(server.model.state_dict())
 
+        # ---------------------------------------------------------
         # 5. 评估
+        # ---------------------------------------------------------
         if round_idx % 1 == 0:
             test_accs = []
             print(f"  > Round {round_idx} Client Accuracies:")
@@ -178,20 +205,22 @@ if __name__ == '__main__':
     parser.add_argument('--num_clients', type=int, default=10)
     parser.add_argument('--alpha', type=float, default=0.5)
 
-    # --- FedCorr 噪声参数 ---
-    parser.add_argument('--level_n_system', type=float, default=0.3, 
-                        help='Fraction of noisy clients (e.g. 0.3 means 30% clients have noise)')
-    parser.add_argument('--level_n_lowerb', type=float, default=0.5, 
-                        help='Lower bound of noise level (e.g. 0.5 means noise ratio is between 0.5 and 1.0)')
+    # FedCorr 噪声参数
+    parser.add_argument('--level_n_system', type=float, default=0.3)
+    parser.add_argument('--level_n_lowerb', type=float, default=0.5)
     
-    # --- FedCorr 修正参数 ---
-    parser.add_argument('--lid_start_round', type=int, default=10, help='Start collecting LID from this round')
-    parser.add_argument('--correction_round', type=int, default=20, help='Round to perform label correction')
-    parser.add_argument('--relabel_ratio', type=float, default=0.5, help='Ratio of noisy samples to correct')
-    parser.add_argument('--confidence_thres', type=float, default=0.8, help='Confidence threshold for correction')
+    # === 关键：FedCorr 控制参数 ===
+    parser.add_argument('--lid_start_round', type=int, default=10, 
+                        help='Start collecting LID scores from this round (warm-up end)')
+    parser.add_argument('--correction_round', type=int, default=20, 
+                        help='Round to perform label correction')
+    
+    parser.add_argument('--relabel_ratio', type=float, default=0.5)
+    parser.add_argument('--confidence_thres', type=float, default=0.8)
 
     args = parser.parse_args()
 
+    # 设备检查
     if args.device == 'cuda' and not torch.cuda.is_available():
         args.device = 'cpu'
     
@@ -209,6 +238,7 @@ if __name__ == '__main__':
     print("Setting up devices and data (CIFAR-10)...")
     clients, server = setupCV.setup_devices_cv(args.datapath, args)
     
+    # 注意这里调用的是 run_fair_fedcorr
     print("Starting FairGraphFL + FedCorr training...")
     result_frame = run_fair_fedcorr(clients, server, args)
     
