@@ -7,7 +7,7 @@ import pandas as pd
 from pathlib import Path
 import copy
 import math
-from sklearn.mixture import GaussianMixture # 需要安装 scikit-learn
+from sklearn.mixture import GaussianMixture 
 import setupCV
 import fl_utils as utils
 
@@ -100,7 +100,14 @@ def run_fair_fedcorr(clients, server, args):
         # 计算相似度更新声誉
         phis = torch.zeros(len(selected_clients))
         for i, client in enumerate(selected_clients):
-            phis[i] = client.cosine_similar(server)
+            # 计算并缓存 Cosine Sim (虽然当前合约未上链此字段，但保留是个好习惯)
+            sim_val = client.cosine_similar(server)
+            phis[i] = sim_val
+            # 【新增】缓存到 client 对象，以备 Gateway 或后续扩展使用
+            if isinstance(sim_val, torch.Tensor):
+                client.cosine_sim_cache = sim_val.item()
+            else:
+                client.cosine_sim_cache = float(sim_val)
             
         rs = 0.95 * rs + 0.05 * phis
         rs = torch.clamp(rs, min=1e-3)
@@ -163,6 +170,22 @@ def run_fair_fedcorr(clients, server, args):
             client.W = {key: value for key, value in client.model.named_parameters()}
             
         server_params_old = copy.deepcopy(server.model.state_dict())
+
+        # =========================================================
+        # 【新增】 区块链上链逻辑 (适配 FLIncentive 合约)
+        # =========================================================
+        # 注意：这里我们只传 reputations 和 incentive_ratios，因为你的精简版合约只接收这些
+        try:
+            gateway.upload_round_data(
+                round_idx=round_idx,
+                server=server,
+                clients=clients,
+                reputations=rs.tolist(),
+                incentive_ratios=q_ratios.tolist()
+            )
+        except Exception as e:
+            print(f"Warning: Blockchain upload failed this round: {e}")
+        # =========================================================
 
         # ---------------------------------------------------------
         # 5. 评估
