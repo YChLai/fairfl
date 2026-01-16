@@ -10,8 +10,11 @@ import math
 from sklearn.mixture import GaussianMixture 
 import setupCV
 import fl_utils as utils
+from gateway import Gateway
 
 def run_fair_fedcorr(clients, server, args):
+    print("Blockchain Gateway initialized.")
+
     """
     FairGraphFL + FedCorr 融合训练流程
     """
@@ -25,6 +28,7 @@ def run_fair_fedcorr(clients, server, args):
     print(f"Start FairGraphFL + FedCorr Training with {len(clients)} clients on {args.device}")
 
     for round_idx in range(1, args.num_rounds + 1):
+        gateway = Gateway("http://localhost:8080")
         print(f"\n--- Round {round_idx} ---")
 
         # ---------------------------------------------------------
@@ -47,6 +51,9 @@ def run_fair_fedcorr(clients, server, args):
             if round_idx >= args.lid_start_round:
                 avg_lid, _ = client.compute_lid_score()
                 lid_accumulative[i] += avg_lid
+
+            # <--- 【新增3】 缓存 LID 到 client 对象
+                client.lid_score_cache = float(avg_lid)
 
         # ---------------------------------------------------------
         # 3. FedCorr 噪声检测与修正逻辑
@@ -72,6 +79,12 @@ def run_fair_fedcorr(clients, server, args):
                 
                 print(f"  > Detected Noisy Clients: {noisy_clients_idx}")
                 print(f"  > Detected Clean Clients: {clean_clients_idx}")
+                # <--- 【新增4】 更新客户端的 is_noisy 状态
+                for idx, client in enumerate(clients):
+                    if idx in noisy_clients_idx:
+                        client.is_noisy = True
+                    else:
+                        client.is_noisy = False
                 
                 # (2) 对噪声客户端进行标签修正
                 for idx in noisy_clients_idx:
@@ -171,10 +184,6 @@ def run_fair_fedcorr(clients, server, args):
             
         server_params_old = copy.deepcopy(server.model.state_dict())
 
-        # =========================================================
-        # 【新增】 区块链上链逻辑 (适配 FLIncentive 合约)
-        # =========================================================
-        # 注意：这里我们只传 reputations 和 incentive_ratios，因为你的精简版合约只接收这些
         try:
             gateway.upload_round_data(
                 round_idx=round_idx,
@@ -184,8 +193,7 @@ def run_fair_fedcorr(clients, server, args):
                 incentive_ratios=q_ratios.tolist()
             )
         except Exception as e:
-            print(f"Warning: Blockchain upload failed this round: {e}")
-        # =========================================================
+            print(f"[Warning] Blockchain upload failed: {e}")
 
         # ---------------------------------------------------------
         # 5. 评估

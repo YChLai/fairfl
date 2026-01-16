@@ -32,6 +32,11 @@ class Client_CV():
         self.simi = {}
         self.rs = {} 
         
+        # === 【新增】 缓存字段，供 Gateway 上链使用 ===
+        self.lid_score_cache = 0.0    # 缓存 LID 分数
+        self.cosine_sim_cache = 0.0   # 缓存 Cosine 相似度
+        self.is_noisy = False         # 标记是否为噪声客户端
+        
     # --- FedCorr 新增功能 ---
     def compute_lid_score(self):
         """
